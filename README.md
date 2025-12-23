@@ -2,18 +2,13 @@
 
 Local-first sheet music viewer focused on performance-friendly page turning. Runs entirely in the browser (offline capable) with no cloud services or accounts.
 
-## Current Status
-Phase 1 viewer prototype:
-- Upload PDF (drag/drop or file picker).
-- Responsive single-page or two-page spread (auto based on width).
-- Page jump input, prev/next controls, and left/right arrow keys.
-- Optional spread offset for alternate pairing (page 1 can sit on the right).
-- Rendered locally via PDF.js; no server processing.
-
-Known gaps:
-- MusicXML/XML uploads are shown as raw text only (no rendering yet).
-- No library/set management or persistence of documents.
-- No audio-driven localization or page-turn gating yet.
+## Audio-Driven Page Turning (Planned)
+The long-term goal is reliable, safe page turning driven by live audio analysis, fully on-device:
+- Build a local fingerprint index from synthetic audio (score-derived) and/or a user-supplied reference recording.
+- Stream microphone audio, extract rolling fingerprints, and retrieve top candidate score positions.
+- Track position with a multi-hypothesis graph-aware localizer that respects repeats, DS/DC, and coda jumps.
+- Gate page turns through configurable page-turn windows plus confidence thresholds and continuity checks.
+- Support modes: follow master score, follow part, and hybrid gating.
 
 ## Getting Started
 
