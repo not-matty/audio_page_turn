@@ -9,6 +9,7 @@ The long-term goal is reliable, safe page turning driven by live audio analysis,
 - Track position with a multi-hypothesis graph-aware localizer that respects repeats, DS/DC, and coda jumps.
 - Gate page turns through configurable page-turn windows plus confidence thresholds and continuity checks.
 - Support modes: follow master score, follow part, and hybrid gating.
+- Use OMR-derived measure mapping to connect audio position back to the PDF.
 
 ## Getting Started
 
@@ -23,7 +24,9 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 ## Audiveris OMR Setup (Local)
-The app can call a local Audiveris installation to generate MusicXML from PDFs.
+The app can call a local Audiveris installation to generate OMR outputs from PDFs.
+These outputs are used for measure mapping and future audio localization. The UI
+continues to display the original PDF (no MusicXML rendering).
 
 Environment variables:
 - `AUDIVERIS_CMD`: command to run (defaults to `audiveris`)
@@ -46,9 +49,9 @@ Phase 1 (MVP)
 - Page-turn window authoring and per-document persistence.
 
 Phase 2
-- MusicXML/MIDI import.
+- Audiveris OMR ingestion (.omr + MusicXML).
 - Score navigation graph (repeats, DS/DC/coda).
-- Score-to-PDF mapping tools.
+- Measure-to-PDF mapping tools.
 
 Phase 3+
 - Synthetic reference indexing and measure hashing.

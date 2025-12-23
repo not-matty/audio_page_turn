@@ -92,20 +92,110 @@ export default function Home() {
     return null;
   }, []);
 
-  const sanitizeMusicXmlDurations = useCallback((text: string) => {
-    let fixed = 0;
-    const xml = text.replace(
+  const sanitizeMusicXml = useCallback((text: string) => {
+    const doctypeMatch = text.match(/<!DOCTYPE[\s\S]*?>/i);
+    const validNoteTypes = new Set([
+      "1024th",
+      "512th",
+      "256th",
+      "128th",
+      "64th",
+      "32nd",
+      "16th",
+      "eighth",
+      "quarter",
+      "half",
+      "whole",
+      "breve",
+      "long",
+      "maxima",
+    ]);
+
+    let fixedDurations = 0;
+    let fixedNoteTypes = 0;
+    let xml = text.replace(
       /<duration>\s*([^<]+)\s*<\/duration>/gi,
       (match, value) => {
         const trimmed = String(value).trim();
         if (/^\d+$/.test(trimmed)) {
           return match;
         }
-        fixed += 1;
+        fixedDurations += 1;
         return "<duration>1</duration>";
       }
     );
-    return { xml, fixed };
+
+    const normalizeNoteType = (value: string) => {
+      const trimmed = value.trim().toLowerCase();
+      return validNoteTypes.has(trimmed) ? trimmed : null;
+    };
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xml, "application/xml");
+    const parserError = doc.querySelector("parsererror");
+    if (parserError) {
+      xml = xml.replace(
+        /(<note\b[^>]*>)([\s\S]*?)(<\/note>)/gi,
+        (match, start, inner, end) => {
+          const updated = inner.replace(
+            /<type>\s*([^<]+)\s*<\/type>/gi,
+            (typeMatch, rawValue) => {
+              const normalized = normalizeNoteType(String(rawValue));
+              if (!normalized) {
+                fixedNoteTypes += 1;
+                return "<type>quarter</type>";
+              }
+              if (normalized !== rawValue) {
+                fixedNoteTypes += 1;
+                return `<type>${normalized}</type>`;
+              }
+              return typeMatch;
+            }
+          );
+          return `${start}${updated}${end}`;
+        }
+      );
+      return { xml, fixedDurations, fixedNoteTypes };
+    }
+
+    doc.querySelectorAll("duration").forEach((node) => {
+      const value = node.textContent?.trim() ?? "";
+      if (!/^\d+$/.test(value)) {
+        node.textContent = "1";
+        fixedDurations += 1;
+      }
+    });
+
+    doc.querySelectorAll("note > type").forEach((node) => {
+      const rawValue = node.textContent ?? "";
+      const normalized = normalizeNoteType(rawValue);
+      if (!normalized) {
+        node.textContent = "quarter";
+        fixedNoteTypes += 1;
+        return;
+      }
+      if (normalized !== rawValue.trim()) {
+        node.textContent = normalized;
+        fixedNoteTypes += 1;
+      }
+    });
+
+    xml = new XMLSerializer().serializeToString(doc);
+    if (doctypeMatch && !xml.includes("<!DOCTYPE")) {
+      const doctype = doctypeMatch[0];
+      if (xml.startsWith("<?xml")) {
+        const index = xml.indexOf("?>");
+        if (index !== -1) {
+          xml = `${xml.slice(0, index + 2)}\n${doctype}${xml.slice(index + 2)}`;
+        } else {
+          xml = `${doctype}\n${xml}`;
+        }
+      } else {
+        xml = `${doctype}\n${xml}`;
+      }
+    }
+
+    return { xml, fixedDurations, fixedNoteTypes };
   }, []);
 
   useEffect(() => {
@@ -226,7 +316,11 @@ export default function Home() {
       } catch (error) {
         if (cancelled) return;
         const message =
-          error instanceof Error ? error.message : "Failed to render MusicXML.";
+          error instanceof Error
+            ? error.message
+            : error
+              ? String(error)
+              : "Failed to render MusicXML.";
         setXmlError(message);
         setXmlLoading(false);
       }
@@ -423,11 +517,16 @@ export default function Home() {
         setXmlFixInfo(null);
         setXmlError(validationError);
       } else {
-        const { xml, fixed } = sanitizeMusicXmlDurations(text);
+        const { xml, fixedDurations, fixedNoteTypes } = sanitizeMusicXml(text);
         setXmlContent(xml);
-        setXmlFixInfo(
-          fixed > 0 ? `Normalized ${fixed} invalid duration values.` : null
-        );
+        const notices: string[] = [];
+        if (fixedDurations > 0) {
+          notices.push(`Normalized ${fixedDurations} invalid duration values.`);
+        }
+        if (fixedNoteTypes > 0) {
+          notices.push(`Normalized ${fixedNoteTypes} invalid note type values.`);
+        }
+        setXmlFixInfo(notices.length ? notices.join(" ") : null);
         setXmlError(null);
       }
       setFileKind("xml");
