@@ -22,6 +22,19 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
+## Audiveris OMR Setup (Local)
+The app can call a local Audiveris installation to generate MusicXML from PDFs.
+
+Environment variables:
+- `AUDIVERIS_CMD`: command to run (defaults to `audiveris`)
+- `AUDIVERIS_ARGS`: extra args before the default flags (e.g., `-jar /path/to/Audiveris.jar`)
+- `AUDIVERIS_TIMEOUT_MS`: optional timeout for long scores
+
+Invocation pattern (built-in):
+```
+<AUDIVERIS_CMD> <AUDIVERIS_ARGS> -batch -export -output <temp_dir> <input.pdf>
+```
+
 ## Tech Stack
 - Next.js (App Router) + React + TypeScript
 - PDF rendering: `pdfjs-dist` (PDF.js)

@@ -1,19 +1,21 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { GlobalWorkerOptions, getDocument, type PDFDocumentProxy } from "pdfjs-dist";
+import type { PDFDocumentProxy } from "pdfjs-dist";
+import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 import styles from "./page.module.css";
 
-const workerSrc = new URL(
-  "pdfjs-dist/build/pdf.worker.min.mjs",
-  import.meta.url
-).toString();
-
-GlobalWorkerOptions.workerSrc = workerSrc;
+type PdfjsModule = typeof import("pdfjs-dist");
 
 type PageSize = {
   width: number;
   height: number;
+};
+
+type OmrResult = {
+  format: "musicxml" | "mxl";
+  content: string;
+  fileName: string;
 };
 
 const GAP_PX = 24;
@@ -25,17 +27,86 @@ export default function Home() {
   const [pageIndex, setPageIndex] = useState(1);
   const [pageSize, setPageSize] = useState<PageSize | null>(null);
   const [fileName, setFileName] = useState("");
-  const [fileKind, setFileKind] = useState<"pdf" | "xml" | "unsupported" | null>(null);
-  const [textPreview, setTextPreview] = useState("");
+  const [fileKind, setFileKind] = useState<
+    "pdf" | "xml" | "mxl" | "unsupported" | null
+  >(null);
+  const [xmlContent, setXmlContent] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [containerWidth, setContainerWidth] = useState(0);
   const [rendering, setRendering] = useState(false);
   const [spreadOffset, setSpreadOffset] = useState(false);
   const [pageInput, setPageInput] = useState("");
   const [isEditingPage, setIsEditingPage] = useState(false);
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [omrResult, setOmrResult] = useState<OmrResult | null>(null);
+  const [omrStatus, setOmrStatus] = useState<string | null>(null);
+  const [omrError, setOmrError] = useState<string | null>(null);
+  const [omrDownloadUrl, setOmrDownloadUrl] = useState<string | null>(null);
+  const [xmlLoading, setXmlLoading] = useState(false);
+  const [xmlError, setXmlError] = useState<string | null>(null);
+  const [xmlFixInfo, setXmlFixInfo] = useState<string | null>(null);
+  const omrRunning = omrStatus === "Running Audiveris...";
 
   const viewerRef = useRef<HTMLDivElement | null>(null);
   const canvasRefs = useRef<Array<HTMLCanvasElement | null>>([]);
+  const xmlContainerRef = useRef<HTMLDivElement | null>(null);
+  const osmdRef = useRef<OpenSheetMusicDisplay | null>(null);
+  const pdfjsRef = useRef<PdfjsModule | null>(null);
+  const pdfjsLoadingRef = useRef<Promise<PdfjsModule> | null>(null);
+
+  const loadPdfjs = useCallback(async () => {
+    if (pdfjsRef.current) return pdfjsRef.current;
+    if (pdfjsLoadingRef.current) return pdfjsLoadingRef.current;
+    pdfjsLoadingRef.current = import("pdfjs-dist").then((pdfjs) => {
+      pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+        "pdfjs-dist/build/pdf.worker.min.mjs",
+        import.meta.url
+      ).toString();
+      pdfjsRef.current = pdfjs;
+      return pdfjs;
+    });
+    return pdfjsLoadingRef.current;
+  }, []);
+
+  const validateMusicXml = useCallback((text: string) => {
+    const trimmed = text.trimStart();
+    if (!trimmed.startsWith("<")) {
+      return "This file does not look like XML. If it is MXL, unzip it first.";
+    }
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(text, "application/xml");
+    const parserError = doc.querySelector("parsererror");
+    if (parserError) {
+      return "Invalid XML format. Please check the file.";
+    }
+    const rootName = doc.documentElement?.nodeName;
+    if (!rootName) {
+      return "XML file is missing a root element.";
+    }
+    if (rootName === "container") {
+      return "This looks like an MXL container file. Unzip and upload the score XML.";
+    }
+    if (rootName !== "score-partwise" && rootName !== "score-timewise") {
+      return `Unsupported MusicXML root element: ${rootName}.`;
+    }
+    return null;
+  }, []);
+
+  const sanitizeMusicXmlDurations = useCallback((text: string) => {
+    let fixed = 0;
+    const xml = text.replace(
+      /<duration>\s*([^<]+)\s*<\/duration>/gi,
+      (match, value) => {
+        const trimmed = String(value).trim();
+        if (/^\d+$/.test(trimmed)) {
+          return match;
+        }
+        fixed += 1;
+        return "<duration>1</duration>";
+      }
+    );
+    return { xml, fixed };
+  }, []);
 
   useEffect(() => {
     const node = viewerRef.current;
@@ -91,6 +162,91 @@ export default function Home() {
     if (!pdfDoc || !canTwoUp) return;
     setPageIndex((current) => normalizePageIndex(current));
   }, [canTwoUp, pdfDoc, normalizePageIndex]);
+
+  useEffect(() => {
+    if (!omrResult) {
+      setOmrDownloadUrl(null);
+      return;
+    }
+    let blob: Blob;
+    const mimeType =
+      omrResult.format === "mxl"
+        ? "application/vnd.recordare.musicxml"
+        : "application/vnd.recordare.musicxml+xml";
+    if (omrResult.format === "musicxml") {
+      blob = new Blob([omrResult.content], {
+        type: mimeType,
+      });
+    } else {
+      const binary = atob(omrResult.content);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      blob = new Blob([bytes], {
+        type: mimeType,
+      });
+    }
+    const url = URL.createObjectURL(blob);
+    setOmrDownloadUrl(url);
+    return () => {
+      URL.revokeObjectURL(url);
+    };
+  }, [omrResult]);
+
+  useEffect(() => {
+    if (fileKind !== "xml") {
+      setXmlLoading(false);
+      setXmlError(null);
+      if (xmlContainerRef.current) {
+        xmlContainerRef.current.innerHTML = "";
+      }
+      osmdRef.current = null;
+      return;
+    }
+    if (!xmlContent || !xmlContainerRef.current || xmlError) return;
+    let cancelled = false;
+    setXmlLoading(true);
+    setXmlError(null);
+    const container = xmlContainerRef.current;
+    container.innerHTML = "";
+    const osmd = new OpenSheetMusicDisplay(container, {
+      autoResize: true,
+      backend: "svg",
+    });
+    osmdRef.current = osmd;
+    const renderXml = async () => {
+      try {
+        await osmd.load(xmlContent);
+        if (cancelled) return;
+        await osmd.render();
+        if (!cancelled) {
+          setXmlLoading(false);
+        }
+      } catch (error) {
+        if (cancelled) return;
+        const message =
+          error instanceof Error ? error.message : "Failed to render MusicXML.";
+        setXmlError(message);
+        setXmlLoading(false);
+      }
+    };
+
+    renderXml();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [fileKind, xmlContent, xmlError]);
+
+  useEffect(() => {
+    if (fileKind !== "xml" || xmlLoading || !osmdRef.current) return;
+    try {
+      osmdRef.current.render();
+    } catch {
+      // Ignore resize render errors.
+    }
+  }, [containerWidth, fileKind, xmlLoading]);
 
   const spreadSlots = useMemo(() => {
     if (!pdfDoc) return [];
@@ -190,56 +346,93 @@ export default function Home() {
     setPageCount(0);
     setPageIndex(1);
     setPageSize(null);
-    setTextPreview("");
+    setXmlContent("");
     setFileKind(null);
     setStatus(null);
     setFileName("");
     setRendering(false);
     setPageInput("");
     setIsEditingPage(false);
+    setUploadedFile(null);
+    setOmrResult(null);
+    setOmrStatus(null);
+    setOmrError(null);
+    setXmlLoading(false);
+    setXmlError(null);
+    setXmlFixInfo(null);
   }, []);
 
   const handleFile = useCallback(async (file: File) => {
     setStatus("Loading file...");
     setFileName(file.name);
     setRendering(false);
-    setTextPreview("");
+    setXmlContent("");
     setFileKind(null);
     setPdfDoc(null);
     setPageCount(0);
     setPageIndex(1);
     setPageInput("");
+    setUploadedFile(null);
+    setOmrResult(null);
+    setOmrStatus(null);
+    setOmrError(null);
+    setXmlLoading(false);
+    setXmlError(null);
+    setXmlFixInfo(null);
 
     const lowerName = file.name.toLowerCase();
+    const isMxl = lowerName.endsWith(".mxl");
     const isPdf =
       file.type === "application/pdf" || lowerName.endsWith(".pdf");
     const isXml =
-      file.type.includes("xml") ||
-      lowerName.endsWith(".xml") ||
-      lowerName.endsWith(".musicxml") ||
-      lowerName.endsWith(".mxl");
+      !isMxl &&
+      (file.type.includes("xml") ||
+        file.type === "application/vnd.recordare.musicxml+xml" ||
+        lowerName.endsWith(".xml") ||
+        lowerName.endsWith(".musicxml"));
 
     if (isPdf) {
       try {
+        const pdfjs = await loadPdfjs();
         const data = await file.arrayBuffer();
-        const loadingTask = getDocument({ data });
+        const loadingTask = pdfjs.getDocument({ data });
         const doc = await loadingTask.promise;
         setPdfDoc(doc);
         setPageCount(doc.numPages);
         setFileKind("pdf");
         setStatus(null);
         setPageInput("1");
+        setUploadedFile(file);
       } catch {
         setStatus("Failed to load PDF.");
       }
       return;
     }
 
+    if (isMxl) {
+      setFileKind("mxl");
+      setStatus("MXL files are compressed. Please unzip to .musicxml and upload.");
+      return;
+    }
+
     if (isXml) {
       const text = await file.text();
-      setTextPreview(text);
+      const validationError = validateMusicXml(text);
+      if (validationError) {
+        setXmlContent("");
+        setXmlFixInfo(null);
+        setXmlError(validationError);
+      } else {
+        const { xml, fixed } = sanitizeMusicXmlDurations(text);
+        setXmlContent(xml);
+        setXmlFixInfo(
+          fixed > 0 ? `Normalized ${fixed} invalid duration values.` : null
+        );
+        setXmlError(null);
+      }
       setFileKind("xml");
       setStatus(null);
+      setUploadedFile(null);
       return;
     }
 
@@ -313,6 +506,35 @@ export default function Home() {
     setPageIndex(normalizePageIndex(value));
   }, [pdfDoc, pageCount, pageInput, pageIndex, normalizePageIndex]);
 
+  const runOmr = useCallback(async () => {
+    if (!uploadedFile) return;
+    setOmrStatus("Running Audiveris...");
+    setOmrError(null);
+    setOmrResult(null);
+    try {
+      const formData = new FormData();
+      formData.append("file", uploadedFile);
+      const response = await fetch("/api/omr", {
+        method: "POST",
+        body: formData,
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        const message = payload?.error || "Audiveris failed to process the file.";
+        throw new Error(message);
+      }
+      const payload = (await response.json()) as OmrResult;
+      setOmrResult(payload);
+      const formatLabel = payload.format === "mxl" ? "MXL" : "MusicXML";
+      setOmrStatus(`${formatLabel} generated.`);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to run Audiveris.";
+      setOmrError(message);
+      setOmrStatus(null);
+    }
+  }, [uploadedFile]);
+
   useEffect(() => {
     if (!pdfDoc) {
       setPageInput("");
@@ -343,24 +565,50 @@ export default function Home() {
           </div>
         </div>
         <div className={styles.controls}>
-          <label className={styles.fileButton}>
-            <input
-              type="file"
-              accept=".pdf,.xml,.musicxml,.mxl,application/pdf,application/xml,text/xml"
-              onChange={handleFileChange}
-            />
-            <span>Choose file</span>
-          </label>
-          {fileName ? (
-            <div className={styles.fileMeta}>
-              <p className={styles.fileName}>{fileName}</p>
-              <button className={styles.clearButton} onClick={clearDoc}>
-                Clear
+          <div className={styles.fileControls}>
+            <label className={styles.fileButton}>
+              <input
+                type="file"
+                accept=".pdf,.xml,.musicxml,.mxl,application/pdf,application/xml,text/xml"
+                onChange={handleFileChange}
+              />
+              <span>Choose file</span>
+            </label>
+            {fileName ? (
+              <div className={styles.fileMeta}>
+                <p className={styles.fileName}>{fileName}</p>
+                <button className={styles.clearButton} onClick={clearDoc}>
+                  Clear
+                </button>
+              </div>
+            ) : (
+              <p className={styles.helper}>PDF or MusicXML only. Stays local.</p>
+            )}
+          </div>
+          {fileKind === "pdf" && (
+            <div className={styles.omrControls}>
+              <button
+                className={styles.omrButton}
+                onClick={runOmr}
+                disabled={!uploadedFile || omrRunning}
+              >
+                {omrRunning ? "Running OMR..." : "Run Audiveris OMR"}
               </button>
+              {omrStatus && <span className={styles.omrStatus}>{omrStatus}</span>}
+              {omrResult && omrDownloadUrl && (
+                <a
+                  className={styles.omrDownload}
+                  href={omrDownloadUrl}
+                  download={omrResult.fileName}
+                >
+                  {omrResult.format === "mxl"
+                    ? "Download MXL"
+                    : "Download MusicXML"}
+                </a>
+              )}
             </div>
-          ) : (
-            <p className={styles.helper}>PDF or MusicXML only. Stays local.</p>
           )}
+          {omrError && <div className={styles.omrError}>{omrError}</div>}
         </div>
       </header>
 
@@ -436,6 +684,7 @@ export default function Home() {
           ref={viewerRef}
           onDrop={handleDrop}
           onDragOver={handleDragOver}
+          data-mode={fileKind ?? "empty"}
         >
           {!fileKind && (
             <div className={styles.placeholder}>
@@ -480,9 +729,20 @@ export default function Home() {
           )}
 
           {fileKind === "xml" && (
-            <pre className={styles.xmlPreview}>
-              {textPreview || "No XML content found."}
-            </pre>
+            <div className={styles.xmlViewer}>
+              <div className={styles.xmlRender} ref={xmlContainerRef} />
+              {xmlFixInfo && <div className={styles.xmlNotice}>{xmlFixInfo}</div>}
+              {xmlLoading && (
+                <div className={styles.rendering}>Rendering MusicXML...</div>
+              )}
+              {xmlError && <div className={styles.status}>{xmlError}</div>}
+            </div>
+          )}
+
+          {fileKind === "mxl" && (
+            <div className={styles.status}>
+              MXL files are compressed. Please unzip to .musicxml and upload.
+            </div>
           )}
 
           {fileKind === "unsupported" && (
